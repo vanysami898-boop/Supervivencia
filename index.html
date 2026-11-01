@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Supervivencia Jurásica</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #2d4a22; overflow: hidden; touch-action: none; font-family: Arial, sans-serif; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr;
+  cv.height = innerHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------- Estado del juego ----------
+const P = { x: 0, y: 0, hp: 100, ammo: 12, weapon: 'pistola', fx: 1, fy: 0, lastShot: -9, lastHit: -9 };
+let dinos = [], bullets = [], drops = [], swings = [];
+let kills = 0, time = 0, gameOver = false;
+let lastSpawn = -9, lastAmmoDrop = 0, lastMedDrop = 0;
+
+const KEYS = {};
+const joy = { active: false, id: null, ox: 0, oy: 0, cx: 0, cy: 0 };
+const btns = { atk: null, sw: null };
+
+function reset() {
+  P.x = 0; P.y = 0; P.hp = 100; P.ammo = 12; P.weapon = 'pistola';
+  P.fx = 1; P.fy = 0; P.lastShot = -9; P.lastHit = -9;
+  dinos = []; bullets = []; drops = []; swings = [];
+  kills = 0; time = 0; gameOver = false;
+  lastSpawn = -9; lastAmmoDrop = 0; lastMedDrop = 0;
+}
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+
+// ---------- Acciones ----------
+function damage(d, n) {
+  if (d.hp <= 0) return;
+  d.hp -= n;
+  d.flash = 0.12;
+  if (d.hp <= 0) kills++;
+}
+
+function switchWeapon() {
+  P.weapon = P.weapon === 'pistola' ? 'machete' : 'pistola';
+}
+
+function attack() {
+  if (gameOver) return;
+  if (P.weapon === 'pistola') {
+    if (time - P.lastShot < 0.45 || P.ammo <= 0) return;
+    P.ammo--;
+    P.lastShot = time;
+    // Apunta automáticamente al dinosaurio más cercano (en 500 px)
+    let best = null, bd = 500;
+    for (const d of dinos) {
+      const dd = Math.hypot(d.x - P.x, d.y - P.y);
+      if (dd < bd) { bd = dd; best = d; }
+    }
+    let dx = P.fx, dy = P.fy;
+    if (best) {
+      dx = best.x - P.x; dy = best.y - P.y;
+      const l = Math.hypot(dx, dy); dx /= l; dy /= l;
+    }
+    bullets.push({ x: P.x, y: P.y, vx: dx * 900, vy: dy * 900, life: 1.2 });
+  } else {
+    if (time - P.lastShot < 0.7) return;
+    P.lastShot = time;
+    swings.push({ a: Math.atan2(P.fy, P.fx), t: 0.2 });
+    for (const d of dinos) {
+      const dx = d.x - P.x, dy = d.y - P.y;
+      const dd = Math.hypot(dx, dy);
+      if (dd < 80 && (dx * P.fx + dy * P.fy) / dd > 0.2) damage(d, 50);
+    }
+  }
+}
+
+// ---------- Entrada: teclado ----------
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  KEYS[k] = true;
+  if (k === ' ') attack();
+  if (k === 'q') switchWeapon();
+  if (k === 'enter' && gameOver) reset();
+});
+addEventListener('keyup', e => { KEYS[e.key.toLowerCase()] = false; });
+
+// ---------- Entrada: táctil / ratón ----------
+function inCircle(c, x, y) { return c && Math.hypot(x - c.x, y - c.y) < c.r; }
+
+addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (gameOver) { reset(); return; }
+  if (inCircle(btns.atk, e.clientX, e.clientY)) { attack(); return; }
+  if (inCircle(btns.sw, e.clientX, e.clientY)) { switchWeapon(); return; }
+  if (e.clientX < innerWidth * 0.55 && !joy.active) {
+    joy.active = true; joy.id = e.pointerId;
+    joy.ox = joy.cx = e.clientX; joy.oy = joy.cy = e.clientY;
+  }
+});
+addEventListener('pointermove', e => {
+  if (joy.active && e.pointerId === joy.id) { joy.cx = e.clientX; joy.cy = e.clientY; }
+});
+function releaseJoy(e) {
+  if (joy.active && e.pointerId === joy.id) joy.active = false;
+}
+addEventListener('pointerup', releaseJoy);
+addEventListener('pointercancel', releaseJoy);
+
+// ---------- Actualización ----------
+function update(dt) {
+  time += dt;
+
+  // Movimiento: teclado y joystick
+  let mx = 0, my = 0;
+  if (KEYS['a'] || KEYS['arrowleft']) mx -= 1;
+  if (KEYS['d'] || KEYS['arrowright']) mx += 1;
+  if (KEYS['w'] || KEYS['arrowup']) my -= 1;
+  if (KEYS['s'] || KEYS['arrowdown']) my += 1;
+  if (joy.active) {
+    const jx = joy.cx - joy.ox, jy = joy.cy - joy.oy;
+    const jl = Math.hypot(jx, jy);
+    if (jl > 8) { const m = Math.min(jl, 60) / 60; mx += (jx / jl) * m; my += (jy / jl) * m; }
+  }
+  const len = Math.hypot(mx, my);
+  if (len > 0) {
+    const nx = mx / Math.max(1, len), ny = my / Math.max(1, len);
+    P.x += nx * 220 * dt;
+    P.y += ny * 220 * dt;
+    P.fx = nx; P.fy = ny;
+  }
+
+  // Balas
+  for (const b of bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    for (const d of dinos) {
+      if (Math.hypot(d.x - b.x, d.y - b.y) < 28) { damage(d, 35); b.life = 0; break; }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+
+  // Aparición de dinosaurios a 550 px del jugador
+  if (time - lastSpawn > 3 && dinos.length < 6) {
+    const ang = Math.random() * Math.PI * 2;
+    dinos.push({
+      x: P.x + Math.cos(ang) * 550, y: P.y + Math.sin(ang) * 550,
+      hp: 100, speed: 70, lastAtk: -9, flash: 0, fx: 0, fy: 1
+    });
+    lastSpawn = time;
+  }
+
+  // IA: persiguen y atacan
+  for (const d of dinos) {
+    const dx = P.x - d.x, dy = P.y - d.y;
+    const dd = Math.hypot(dx, dy) || 1;
+    d.fx = dx / dd; d.fy = dy / dd;
+    if (dd > 40) {
+      const sp = d.speed * (1 + time / 120);
+      d.x += d.fx * sp * dt;
+      d.y += d.fy * sp * dt;
+    } else if (time - d.lastAtk > 1 && P.hp > 0) {
+      d.lastAtk = time;
+      P.hp -= 12;
+      P.lastHit = time;
+    }
+    d.flash = Math.max(0, d.flash - dt);
+  }
+  dinos = dinos.filter(d => d.hp > 0);
+
+  // Objetos que recoger: munición cada 12 s, botiquín cada 25 s
+  if (time - lastAmmoDrop > 12) {
+    drops.push({ x: P.x + rnd(-300, 300), y: P.y + rnd(-300, 300), t: 'ammo' });
+    lastAmmoDrop = time;
+  }
+  if (time - lastMedDrop > 25) {
+    drops.push({ x: P.x + rnd(-300, 300), y: P.y + rnd(-300, 300), t: 'med' });
+    lastMedDrop = time;
+  }
+  for (const k of drops) {
+    if (Math.hypot(k.x - P.x, k.y - P.y) < 35) {
+      if (k.t === 'ammo') P.ammo += 6;
+      else P.hp = Math.min(100, P.hp + 30);
+      k.taken = true;
+    }
+  }
+  drops = drops.filter(k => !k.taken);
+
+  // Animación del machete
+  for (const s of swings) s.t -= dt;
+  swings = swings.filter(s => s.t > 0);
+
+  if (P.hp <= 0) { P.hp = 0; gameOver = true; }
+}
+
+// ---------- Dibujo ----------
+function drawDino(d) {
+  ctx.save();
+  ctx.translate(d.x, d.y);
+  ctx.rotate(Math.atan2(d.fy, d.fx));
+  const claro = d.flash > 0;
+  // Cola
+  ctx.fillStyle = claro ? '#fff' : '#2b6b2b';
+  ctx.beginPath(); ctx.moveTo(-18, -6); ctx.lineTo(-48, 0); ctx.lineTo(-18, 6); ctx.fill();
+  // Patas
+  ctx.fillRect(-12, -18, 7, 8); ctx.fillRect(4, -18, 7, 8);
+  ctx.fillRect(-12, 10, 7, 8); ctx.fillRect(4, 10, 7, 8);
+  // Cuerpo
+  ctx.fillStyle = claro ? '#fff' : '#3c8c3c';
+  ctx.beginPath(); ctx.ellipse(0, 0, 24, 15, 0, 0, Math.PI * 2); ctx.fill();
+  // Cabeza
+  ctx.beginPath(); ctx.ellipse(25, 0, 12, 9, 0, 0, Math.PI * 2); ctx.fill();
+  // Ojos
+  ctx.fillStyle = '#ffd21a';
+  ctx.beginPath(); ctx.arc(28, -4, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Barra de vida del dinosaurio
+  ctx.fillStyle = '#000';
+  ctx.fillRect(d.x - 20, d.y - 34, 40, 5);
+  ctx.fillStyle = '#e53935';
+  ctx.fillRect(d.x - 20, d.y - 34, 40 * d.hp / 100, 5);
+}
+
+function draw() {
+  const w = innerWidth, h = innerHeight;
+  ctx.fillStyle = '#3d6b2c';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.translate(w / 2 - P.x, h / 2 - P.y);
+
+  // Suelo con cuadrícula
+  const cs = 80;
+  const x0 = Math.floor((P.x - w / 2) / cs) * cs, x1 = P.x + w / 2;
+  const y0 = Math.floor((P.y - h / 2) / cs) * cs, y1 = P.y + h / 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = x0; x < x1; x += cs) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+  for (let y = y0; y < y1; y += cs) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+  ctx.stroke();
+
+  // Objetos
+  for (const k of drops) {
+    if (k.t === 'ammo') {
+      ctx.fillStyle = '#f1c40f';
+      ctx.fillRect(k.x - 12, k.y - 9, 24, 18);
+      ctx.fillStyle = '#000'; ctx.font = 'bold 12px Arial'; ctx.textAlign = 'center';
+      ctx.fillText('A', k.x, k.y + 4);
+    } else {
+      ctx.fillStyle = '#e74c3c';
+      ctx.beginPath(); ctx.arc(k.x, k.y, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(k.x - 2, k.y - 7, 4, 14); ctx.fillRect(k.x - 7, k.y - 2, 14, 4);
+    }
+  }
+
+  // Dinosaurios
+  for (const d of dinos) drawDino(d);
+
+  // Balas
+  ctx.fillStyle = '#ffeb3b';
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill(); }
+
+  // Arco del machete
+  for (const s of swings) {
+    ctx.strokeStyle = 'rgba(230,230,230,' + (s.t / 0.2) + ')';
+    ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.arc(P.x, P.y, 75, s.a - 0.9, s.a + 0.9); ctx.stroke();
+  }
+
+  // Jugador y arma
+  ctx.fillStyle = '#2e86de';
+  ctx.beginPath(); ctx.arc(P.x, P.y, 14, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = P.weapon === 'pistola' ? '#444' : '#bdc3c7';
+  ctx.lineWidth = P.weapon === 'pistola' ? 6 : 4;
+  ctx.beginPath();
+  ctx.moveTo(P.x + P.fx * 10, P.y + P.fy * 10);
+  ctx.lineTo(P.x + P.fx * 28, P.y + P.fy * 28);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // Flash rojo al recibir daño
+  if (time - P.lastHit < 0.2 && !gameOver) {
+    ctx.fillStyle = 'rgba(255,0,0,0.25)';
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  // Joystick visible
+  if (joy.active) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 60, 0, Math.PI * 2); ctx.stroke();
+    let kx = joy.cx - joy.ox, ky = joy.cy - joy.oy;
+    const kl = Math.hypot(kx, ky);
+    if (kl > 60) { kx = kx / kl * 60; ky = ky / kl * 60; }
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(joy.ox + kx, joy.oy + ky, 26, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Botones táctiles
+  btns.atk = { x: w - 80, y: h - 90, r: 52 };
+  btns.sw = { x: w - 80, y: h - 200, r: 36 };
+  drawButton(btns.atk, 'ATAQUE', 'rgba(231,76,60,0.7)');
+  drawButton(btns.sw, 'ARMA', 'rgba(52,152,219,0.7)');
+
+  // HUD
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#000';
+  ctx.fillRect(16, 16, 204, 22);
+  ctx.fillStyle = P.hp > 30 ? '#2ecc71' : '#e74c3c';
+  ctx.fillRect(18, 18, 200 * P.hp / 100, 18);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px Arial';
+  ctx.fillText('Vida ' + Math.ceil(P.hp), 226, 33);
+
+  const nombreArma = P.weapon === 'pistola' ? 'Pistola' : 'Machete';
+  const municion = P.weapon === 'pistola' ? P.ammo : '∞';
+  const puntos = kills * 5 + Math.floor(time);
+  ctx.font = 'bold 15px Arial';
+  ctx.fillText('Arma: ' + nombreArma + '   Munición: ' + municion, 16, 64);
+  ctx.fillText('Puntos: ' + puntos + '   Dinos eliminados: ' + kills, 16, 86);
+
+  if (time < 10 && !gameOver) {
+    ctx.font = '14px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('Izquierda: mover · Botón ATAQUE: disparar o golpear · ARMA: cambiar', 16, h - 20);
+  }
+
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#e74c3c';
+    ctx.font = 'bold 36px Arial';
+    ctx.fillText('HAS MUERTO', w / 2, h / 2 - 50);
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px Arial';
+    ctx.fillText('Sobreviviste ' + Math.floor(time) + ' s · Puntos: ' + puntos, w / 2, h / 2);
+    ctx.font = '16px Arial';
+    ctx.fillText('Toca la pantalla para jugar de nuevo', w / 2, h / 2 + 45);
+  }
+}
+
+function drawButton(b, texto, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 13px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(texto, b.x, b.y + 5);
+}
+
+// ---------- Bucle principal ----------
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!gameOver) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
